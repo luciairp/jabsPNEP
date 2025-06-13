@@ -149,36 +149,68 @@ library(terra)
 library(ggplot2)
 library(purrr)
 
-# Lista con estimaciones kernel por muestreo
-densidades_df <- datos_coords_utm %>%
-  st_drop_geometry() %>%
-  filter(anysign_tot > 0) %>%
-  split(.$muestreo) %>%
-  map_dfr(function(df) {
-    # Crear ventana rectangular
-    win <- as.owin(c(range(df$x), range(df$y)))
-    pp <- ppp(x = df$x, y = df$y, window = win, marks = df$anysign_tot)
-    
-    # Expandimos puntos según intensidad
-    pp_exp <- pp[rep(1:npoints(pp), marks(pp))]
-    
-    # Estimar densidad kernel
-    dens <- density(pp_exp, sigma = 100) # ajustá sigma si es necesario
-    
-    # Convertimos a raster y luego a data.frame
-    r <- rast(dens)
-    df_r <- as.data.frame(r, xy = TRUE)
-    names(df_r)[3] <- "densidad"
-    df_r$muestreo <- df$muestreo[1]
-    df_r
-  }, .id = NULL)
+distmat <- as.matrix(dist(cbind(datos_coords_utm$x,datos_coords_utm$y)))
+maxdist <- 2/3*max(distmat) # alrededor de 8500
+max(distmat) # 13 mil
 
-# Graficar
-ggplot(densidades_df, aes(x = x, y = y, fill = densidad)) +
-  geom_raster() +
-  scale_fill_viridis_c(name = "Densidad") +
-  coord_equal() +
-  facet_grid(. ~ muestreo) +
-  theme_minimal() +
-  labs(title = "Densidad kernel de signos por muestreo",
-       x = "X (UTM)", y = "Y (UTM)")
+# pruebo con conjunto de datos más chico:
+# solo 1 muestreo, solo hozadas y xy
+idplot <- unique(datos_coords_utm$idplot)
+chico <- datos_coords_utm %>% 
+  filter(muestreo == "FEB 21") %>% 
+  distinct(idplot, .keep_all = TRUE) %>% 
+  select(x,y,hozadas)
+chico$x <- as.numeric(chico$x)
+chico$y <- as.numeric(chico$y)
+chico$hozadas <- as.numeric(chico$hozadas)
+
+str(chico)
+library(ncf)
+correlog <- ncf::correlog(x=chico$x,y=chico$y,z=chico$hozadas, increment = 100,resamp = 99)
+plot(correlog)
+abline(h=0)
+
+library(geoR)
+# fabrioo objeto geoR
+objgeoR <- as.geodata(chico)
+plot(objgeoR)
+emp.variogram <- variog(objgeoR,max.dist = 9000)
+plot(emp.variogram)
+emp.variogram <- variog4(objgeoR,max.dist = 9000)
+plot(emp.variogram)
+
+# kriging
+# primero exponential variogram
+mlexp <- likfit(objgeoR, cov.model = "exp", ini.cov.pars = c(200,15))
+summary(mlexp)
+x_vals <- seq(from = min(chico$x), to = max(chico$x), length.out = 25)  # Ajusta a una cantidad razonable
+y_vals <- seq(from = min(chico$y), to = max(chico$y), length.out = 25)  # Ajusta a una cantidad razonable
+new.grid <- expand.grid(x_vals, y_vals)
+
+#new.grid <- expand.grid(375000:max(chico$x),6467320:max(chico$y))
+krig <- krige.conv(objgeoR,locations = new.grid,
+                   krige = krige.control(cov.pars = c(mlexp$cov.pars[1],
+                                                      mlexp$cov.pars[2]),
+                                         nugget=mlexp$nugget,cov.model = "exp",type.krige = "OK"))
+image(krig)
+
+library(ggplot2)
+
+library(ggplot2)
+
+# Asegúrate de tener las ubicaciones de la predicción y las predicciones
+# krig$prediction.locations es donde están las coordenadas de la cuadrícula
+krig_data <- data.frame(
+  x = new.grid[, 1],  # Coordenada x
+  y = new.grid[, 2],  # Coordenada y
+  hozadas = krig$predict               # Las predicciones del kriging
+)
+
+# Crear el mapa con ggplot2
+ggplot(krig_data, aes(x = x, y = y, fill = hozadas)) +
+  geom_tile() +  # Utiliza geom_tile para crear una superficie
+  scale_fill_gradient(low = "blue", high = "red") + 
+  labs(title = "Kriging: Superficie Interpolada",
+       fill = "Hozadas") +  
+  theme_minimal()  
+
